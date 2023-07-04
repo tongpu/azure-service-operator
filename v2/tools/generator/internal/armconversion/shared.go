@@ -7,6 +7,8 @@ package armconversion
 
 import (
 	"fmt"
+	"github.com/pkg/errors"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"strings"
 	"sync"
 
@@ -41,7 +43,7 @@ const (
 func (builder conversionBuilder) propertyConversionHandler(
 	toProp *astmodel.PropertyDefinition,
 	fromType *astmodel.ObjectType,
-) []dst.Stmt {
+) ([]dst.Stmt, error) {
 	var err error
 	for _, conversionHandler := range builder.propertyConversionHandlers {
 		conversion, convErr := conversionHandler(toProp, fromType)
@@ -51,7 +53,7 @@ func (builder conversionBuilder) propertyConversionHandler(
 		}
 
 		if conversion.matched {
-			return conversion.statements
+			return conversion.statements, nil
 		}
 	}
 
@@ -69,10 +71,10 @@ func (builder conversionBuilder) propertyConversionHandler(
 		armDescription.String())
 
 	if err != nil {
-		message += "\n" + err.Error()
+		return nil, errors.Wrap(err, message)
 	}
 
-	panic(message)
+	return nil, errors.New(message)
 }
 
 type propertyConversionHandler = func(
@@ -90,7 +92,7 @@ var notHandled = propertyConversionHandlerResult{
 	matched: false,
 }
 
-// emptyPropertyconversion is a result to use when a handler wants to return an empty set of statements for a conversion
+// handledWithNOP is a result to use when a handler wants to return an empty set of statements for a conversion
 var handledWithNOP = propertyConversionHandlerResult{
 	matched: true,
 }
@@ -139,11 +141,17 @@ func getReceiverObjectType(codeGenerationContext *astmodel.CodeGenerationContext
 func generateTypeConversionAssignments(
 	fromType *astmodel.ObjectType,
 	toType *astmodel.ObjectType,
-	propertyHandler func(toProp *astmodel.PropertyDefinition, fromType *astmodel.ObjectType) []dst.Stmt,
-) []dst.Stmt {
+	propertyHandler func(toProp *astmodel.PropertyDefinition, fromType *astmodel.ObjectType) ([]dst.Stmt, error),
+) ([]dst.Stmt, error) {
 	var result []dst.Stmt
+	var errs []error
 	for _, toField := range toType.Properties().AsSlice() {
-		fieldConversionStmts := propertyHandler(toField, fromType)
+		fieldConversionStmts, err := propertyHandler(toField, fromType)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
 		if len(fieldConversionStmts) > 0 {
 			result = append(result, &dst.EmptyStmt{
 				Decs: dst.EmptyStmtDecorations{
@@ -166,7 +174,7 @@ func generateTypeConversionAssignments(
 		}
 	}
 
-	return result
+	return result, kerrors.NewAggregate(errs)
 }
 
 // NewARMConversionImplementation creates an interface implementation with the specified ARM conversion functions
